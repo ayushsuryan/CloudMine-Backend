@@ -1,6 +1,12 @@
 const User = require("../models/User");
 const Rig = require("../models/Rig");
+const Deposit = require("../models/Deposit");
+const Withdrawal = require("../models/Withdrawal");
+const Bank = require("../models/Bank");
 const generateToken = require("../utils/generateToken");
+
+const axios = require("axios");
+const qs = require("qs");
 
 // User Signup
 exports.registerUser = async (req, res) => {
@@ -52,6 +58,135 @@ exports.loginUser = async (req, res) => {
   }
 };
 
+// User Deposit
+exports.createDeposit = async (req, res) => {
+  const { chid, amount, order_id, callback, page_url } = req.body;
+  const user = req.user; // Access the user from request object
+
+  // Input Validation
+  if (!chid || !amount || !callback || !page_url) {
+    return res.status(400).json({ error: "Missing required fields." });
+  }
+
+  // Prepare payload for MXPay API in URL-encoded format
+  const payload = {
+    api_key: process.env.API_KEY,
+    chid,
+    amount: parseFloat(amount),
+    order_id: order_id,
+    callback,
+    page_url,
+  };
+
+  console.log("Payload:", payload);
+
+  // Create a new deposit entry in the database (with initated status)
+  const newDeposit = new Deposit({
+    user: user._id, // Save the user's ID
+    chid,
+    amount: parseFloat(amount),
+    order_id: order_id,
+  });
+
+  try {
+    // Make POST request to MXPay's /api/web.php endpoint with URL-encoded payload
+    const response = await axios.post(
+      "https://mxpay.one/api/web.php",
+      qs.stringify(payload), // Convert payload to x-www-form-urlencoded format
+      {
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded", // Set correct content type
+        },
+      }
+    );
+
+    // Store the response in the deposit entry
+    newDeposit.apiResponse = response.data;
+
+    // Check if MXPay responded with success
+    if (response.data.status == true) {
+      newDeposit.status = "pending";
+      await newDeposit.save(); // Save the pending deposit data into the database
+
+      return res.status(200).json({
+        message: "Deposit initiated successfully.",
+        data: response.data,
+        deposit: newDeposit,
+      });
+    } else {
+      newDeposit.status = "initiated";
+      await newDeposit.save(); // Save the initiated deposit to the database
+
+      return res.status(400).json({
+        error: "Failed to initiate deposit.",
+        details: response.data,
+        deposit: newDeposit,
+      });
+    }
+  } catch (error) {
+    console.error(
+      "Deposit API Error:",
+      error.response ? error.response.data : error.message
+    );
+
+    newDeposit.status = "failed";
+    await newDeposit.save(); // Save the failed deposit attempt to the database
+
+    return res.status(500).json({
+      error: "An error occurred while processing the deposit.",
+      deposit: newDeposit,
+    });
+  }
+};
+
+exports.handleCallback = async (req, res) => {
+  console.log(req.body);
+  const { order_id, status, amount } = req.body;
+
+  // Input Validation
+  if (!order_id || typeof status === "undefined" || !amount) {
+    return res.status(400).json({ error: "Invalid callback data." });
+  }
+
+  try {
+    // Find the deposit using the order_id
+    const deposit = await Deposit.findOne({ order_id }).populate("user"); // Populate the user reference
+
+    if (!deposit) {
+      return res.status(404).json({ error: "Deposit not found." });
+    }
+
+    // Verify the payment status received from MXPay
+    if (status === "success") {
+      // Update the deposit status to completed if payment was successful
+      deposit.status = "success";
+
+      // Find the associated user and update their balance
+      const user = deposit.user;
+      if (user) {
+        user.balance = (user.balance || 0) + parseFloat(amount); // Add the deposit amount to the user's balance
+        await user.save(); // Save the updated user
+      }
+    } else {
+      // Update the deposit status to failed if payment was not successful
+      deposit.status = "failed";
+    }
+
+    // Save the updated deposit
+    await deposit.save();
+
+    console.log("Payment Callback Processed:", req.body);
+
+    // Respond to the callback
+    res
+      .status(200)
+      .json({ message: "Callback received and processed successfully." });
+  } catch (error) {
+    console.error("Error processing callback:", error);
+    return res.status(500).json({ error: "Internal server error." });
+  }
+};
+
 // Fetch Balance
 exports.getBalance = async (req, res) => {
   try {
@@ -62,8 +197,15 @@ exports.getBalance = async (req, res) => {
   }
 };
 
-//Fetch Available Rigs
+//Defining Available Rigs
 const availableRigs = [
+  {
+    rigType: "rig_1000",
+    price: 1000,
+    dailyReturn: 1000 * 0.02,
+    miningDays: 90,
+    status: "active",
+  },
   {
     rigType: "rig_4000",
     price: 4000,
@@ -269,5 +411,127 @@ exports.stopMining = async (req, res) => {
     res.json({ msg: "Mining stopped successfully" });
   } catch (err) {
     res.status(500).json({ msg: err.message });
+  }
+};
+
+//Create Bank details
+exports.createBankDetails = async (req, res) => {
+  try {
+    const user = req.user; // Access the user from req.user
+
+    const { accountHolderName, accountNumber, bankName, ifscCode } = req.body;
+
+    // Check if the user already has bank details
+    const existingBankDetails = await Bank.findOne({ user: user._id });
+
+    if (existingBankDetails) {
+      return res.status(400).json({
+        error:
+          "User already has bank details. You can update the existing details instead.",
+      });
+    }
+
+    // If no bank details exist, create new ones
+    const newBankDetails = new Bank({
+      user: user._id,
+      accountHolderName,
+      accountNumber,
+      bankName,
+      ifscCode,
+    });
+
+    await newBankDetails.save();
+
+    res.status(201).json({
+      message: "Bank details created successfully",
+      data: newBankDetails,
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: "An error occurred while creating bank details",
+    });
+  }
+};
+
+//Fetch Bank Details
+exports.getBankDetails = async (req, res) => {
+  try {
+    const user = req.user; // Access the user from req.user
+
+    // Fetch bank details for the user
+    const bankDetails = await Bank.findOne({ user: user._id });
+
+    if (!bankDetails) {
+      return res.status(404).json({
+        error: "Bank details not found for the user.",
+      });
+    }
+
+    res.status(200).json({
+      message: "Bank details retrieved successfully",
+      data: bankDetails,
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: "An error occurred while fetching bank details",
+    });
+  }
+};
+
+// Create Withdrawals
+exports.createWithdrawal = async (req, res) => {
+  const { amount } = req.body;
+  const user = req.user;
+
+  if (amount <= 0) {
+    return res
+      .status(400)
+      .json({ message: "Withdrawal amount must be positive" });
+  }
+
+  if (user.balance < amount) {
+    return res.status(400).json({ message: "Insufficient balance" });
+  }
+
+  try {
+    // Deduct the amount from user's balance
+    user.balance -= amount;
+    await user.save();
+
+    const withdrawal = new Withdrawal({
+      user: user._id,
+      amount,
+    });
+    await withdrawal.save();
+
+    res.status(201).json({ message: "Withdrawal request created" });
+  } catch (err) {
+    res.status(500).json({
+      message: "Error creating withdrawal request",
+      error: err.message,
+    });
+  }
+};
+
+// Get Withdrawals
+exports.getWithdrawals = async (req, res) => {
+  const user = req.user; // Assuming `req.user` contains the authenticated user's information
+
+  try {
+    // Find withdrawals associated with the current user
+    const withdrawals = await Withdrawal.find({ user: user._id });
+
+    if (!withdrawals || withdrawals.length === 0) {
+      return res
+        .status(404)
+        .json({ message: "No withdrawals found for this user" });
+    }
+
+    res.status(200).json(withdrawals);
+  } catch (err) {
+    res.status(500).json({
+      message: "Error retrieving withdrawals",
+      error: err.message,
+    });
   }
 };
