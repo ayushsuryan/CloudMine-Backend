@@ -233,11 +233,21 @@ exports.orderRig = async (req, res) => {
       price,
       dailyReturn: price * 0.02,
     });
-    user.balance -= price;
-    user.rigs.push(rig._id);
 
-    await rig.save();
-    await user.save();
+    // Use findOneAndUpdate to atomically update the user's balance
+    const updatedUser = await User.findOneAndUpdate(
+      { _id: req.user._id },
+      { $inc: { balance: -price }, $push: { rigs: rig._id } }, // Deduct balance and push the rig
+      { new: true }
+    );
+
+    if (!updatedUser) {
+      return res
+        .status(400)
+        .json({ msg: "User not found or insufficient balance." });
+    }
+
+    await rig.save(); // Save the new rig after updating the user's balance
     res.json({ msg: "Rig ordered successfully", rig });
   } catch (err) {
     res.status(500).json({ msg: err.message });
@@ -245,6 +255,8 @@ exports.orderRig = async (req, res) => {
 };
 
 // Start Mining
+let globalMiningInterval = null; // Global interval to handle mining
+
 exports.startMining = async (req, res) => {
   const { rigId } = req.body;
 
@@ -265,86 +277,76 @@ exports.startMining = async (req, res) => {
       });
     }
 
-    // If the rig is stopped or active, allow it to start/resume mining
+    // Set the rig status to active and save
     if (rig.status === "stopped" || rig.status === "active") {
-      // Set the rig status to active and save
       rig.status = "active";
-      await rig.save(); // Save the updated rig status initially
+      await rig.save();
+    }
 
-      // Create an interval for mining
-      rig.miningInterval = setInterval(async () => {
-        // Fetch all active rigs of the user
-        const activeRigs = await Rig.find({
-          user: req.user._id,
-          status: "active",
-        });
+    // Start global interval if it's not already running
+    if (!globalMiningInterval) {
+      globalMiningInterval = setInterval(async () => {
+        try {
+          // Find all active rigs across all users
+          const activeRigs = await Rig.find({ status: "active" });
 
-        // Check if the user still exists (not necessary if you manage user sessions)
-        if (!req.user) {
-          clearInterval(rig.miningInterval);
-          rig.miningInterval = null;
-          return res.status(404).json({ msg: "User not found." });
+          // Group rigs by user
+          const userRigsMap = {};
+          activeRigs.forEach((rig) => {
+            if (!userRigsMap[rig.user]) {
+              userRigsMap[rig.user] = [];
+            }
+            userRigsMap[rig.user].push(rig);
+          });
+
+          // Loop through each user's rigs and calculate the total balance addition
+          for (const userId of Object.keys(userRigsMap)) {
+            let totalBalanceAddition = 0;
+
+            for (const rig of userRigsMap[userId]) {
+              const currentDate = new Date();
+              const purchaseDate = new Date(rig.purchaseDate);
+
+              // Calculate the difference in milliseconds and convert it to days
+              const timeDifference = currentDate - purchaseDate;
+              const daysPassed = Math.floor(
+                timeDifference / (1000 * 60 * 60 * 24)
+              );
+
+              // Calculate the balance addition for this rig
+              const balanceAddition = (
+                rig.dailyReturn /
+                (24 * 60 * 20)
+              ).toFixed(2);
+
+              totalBalanceAddition += parseFloat(balanceAddition);
+
+              // If miningDays reach 0, mark the rig as completed
+              if (daysPassed >= rig.miningDays) {
+                rig.status = "completed";
+              }
+
+              await rig.save(); // Save the updated rig status
+            }
+
+            // Update the user's balance atomically
+            await User.findOneAndUpdate(
+              { _id: userId },
+              { $inc: { balance: totalBalanceAddition } }
+            );
+          }
+        } catch (err) {
+          console.error(err.message);
+
+          // If there's an error, stop the global interval
+          clearInterval(globalMiningInterval);
+          globalMiningInterval = null;
         }
-
-        // Calculate the total balance addition for all active rigs
-        let totalBalanceAddition = 0;
-
-        for (const activeRig of activeRigs) {
-          // Check the status of each rig
-          if (activeRig.status === "completed") {
-            clearInterval(rig.miningInterval); // Stop the mining process
-            rig.miningInterval = null; // Reset the interval reference
-            return res.status(400).json({
-              msg: "Mining period is completed for one of the rigs, cannot resume.",
-            });
-          }
-
-          // Check if the rig is stopped before updating balance
-          if (activeRig.status === "stopped") {
-            continue; // Skip this rig if it is stopped
-          }
-
-          const currentDate = new Date();
-          const purchaseDate = new Date(activeRig.purchaseDate);
-
-          // Calculate the difference in milliseconds and convert it to days
-          const timeDifference = currentDate - purchaseDate; // Difference in milliseconds
-          const daysPassed = Math.floor(timeDifference / (1000 * 60 * 60 * 24));
-
-          // Calculate the balance addition for this rig
-          const balanceAddition = (
-            activeRig.dailyReturn /
-            (24 * 60 * 20)
-          ).toFixed(2);
-
-          totalBalanceAddition += parseFloat(balanceAddition); // Accumulate balance addition for all active rigs
-
-          // If miningDays reach 0, stop the mining and mark the rig as completed
-          if (daysPassed >= activeRig.miningDays) {
-            activeRig.status = "completed";
-            await activeRig.save(); // Save the updated rig status
-          } else {
-            await activeRig.save(); // Save the updated rig status
-          }
-        }
-
-        // Update the user's balance
-        req.user.balance += totalBalanceAddition;
-        await req.user.save(); // Save the updated user balance
       }, 3000); // Update every 3 seconds
+    }
 
-      res.json({ msg: "Mining started or resumed successfully." });
-    } else {
-      res
-        .status(400)
-        .json({ msg: "Cannot start mining. The rig is in an invalid state." });
-    }
+    res.json({ msg: "Mining started or resumed successfully." });
   } catch (err) {
-    // If there's an error, ensure the interval is cleared if it's set
-    if (rig && rig.miningInterval) {
-      clearInterval(rig.miningInterval);
-      rig.miningInterval = null; // Reset the interval reference
-    }
     res.status(500).json({ msg: err.message });
   }
 };
