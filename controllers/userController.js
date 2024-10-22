@@ -507,3 +507,24 @@ exports.getWithdrawals = async (req, res) => {
     });
   }
 };
+
+exports.getReferredUsers = async (req, res) => {
+  try {
+    // Fetch the current user by ID
+    const user = await User.findById(req.user._id).populate({
+      path: "referredUsers", // Populate the referredUsers array
+      select: "name balance", // Select only the name and balance fields
+    });
+
+    if (!user) {
+      return res.status(404).json({ msg: "User not found" });
+    }
+
+    // Return the list of referred users with their name and balance
+    res.json({
+      referredUsers: user.referredUsers, // This will contain the array of users with name and balance
+    });
+  } catch (err) {
+    res.status(500).json({ msg: "Server error", error: err.message });
+  }
+};

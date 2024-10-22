@@ -13,6 +13,7 @@ const {
   createWithdrawal,
   createBankDetails,
   getBankDetails,
+  getReferredUsers,
 } = require("../controllers/userController");
 const { protect } = require("../middlewares/authMiddleware");
 
@@ -31,5 +32,6 @@ router.post("/create-bank", protect, createBankDetails);
 router.get("/get-bank", protect, getBankDetails);
 router.get("/get-withdrawals", protect, getWithdrawals);
 router.post("/create-withdrawals", protect, createWithdrawal);
+router.get("/referred-users", protect, getReferredUsers);
 
 module.exports = router;
