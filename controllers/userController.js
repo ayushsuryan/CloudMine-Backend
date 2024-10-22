@@ -140,7 +140,6 @@ exports.createDeposit = async (req, res) => {
 };
 
 exports.handleCallback = async (req, res) => {
-  console.log(req.body);
   const { order_id, status, amount } = req.body;
 
   // Input Validation
@@ -201,7 +200,6 @@ exports.getBalance = async (req, res) => {
 
 // Fetch all rigs purchased by the user
 exports.getAvailableRigs = async (req, res) => {
-  console.log(req);
   try {
     // Fetch the rigs that belong to the logged-in user
     const rigs = await Rig.find({ user: req.user._id }); // Assuming `user` is the field that references the User model
@@ -275,57 +273,64 @@ exports.startMining = async (req, res) => {
 
       // Create an interval for mining
       rig.miningInterval = setInterval(async () => {
-        // Fetch the latest status of the rig from the database
-        const updatedRig = await Rig.findById(rigId);
-        if (!updatedRig) {
+        // Fetch all active rigs of the user
+        const activeRigs = await Rig.find({
+          user: req.user._id,
+          status: "active",
+        });
+
+        // Check if the user still exists (not necessary if you manage user sessions)
+        if (!req.user) {
           clearInterval(rig.miningInterval);
           rig.miningInterval = null;
-          return res.status(404).json({ msg: "Invalid rig" });
+          return res.status(404).json({ msg: "User not found." });
         }
 
-        // Check the status of the rig
-        if (updatedRig.status === "completed") {
-          clearInterval(rig.miningInterval); // Stop the mining process
-          rig.miningInterval = null; // Reset the interval reference
-          return res.status(400).json({
-            msg: "Mining period is completed, cannot resume.",
-          });
+        // Calculate the total balance addition for all active rigs
+        let totalBalanceAddition = 0;
+
+        for (const activeRig of activeRigs) {
+          // Check the status of each rig
+          if (activeRig.status === "completed") {
+            clearInterval(rig.miningInterval); // Stop the mining process
+            rig.miningInterval = null; // Reset the interval reference
+            return res.status(400).json({
+              msg: "Mining period is completed for one of the rigs, cannot resume.",
+            });
+          }
+
+          // Check if the rig is stopped before updating balance
+          if (activeRig.status === "stopped") {
+            continue; // Skip this rig if it is stopped
+          }
+
+          const currentDate = new Date();
+          const purchaseDate = new Date(activeRig.purchaseDate);
+
+          // Calculate the difference in milliseconds and convert it to days
+          const timeDifference = currentDate - purchaseDate; // Difference in milliseconds
+          const daysPassed = Math.floor(timeDifference / (1000 * 60 * 60 * 24));
+
+          // Calculate the balance addition for this rig
+          const balanceAddition = (
+            activeRig.dailyReturn /
+            (24 * 60 * 20)
+          ).toFixed(2);
+
+          totalBalanceAddition += parseFloat(balanceAddition); // Accumulate balance addition for all active rigs
+
+          // If miningDays reach 0, stop the mining and mark the rig as completed
+          if (daysPassed >= activeRig.miningDays) {
+            activeRig.status = "completed";
+            await activeRig.save(); // Save the updated rig status
+          } else {
+            await activeRig.save(); // Save the updated rig status
+          }
         }
 
-        // Check if the rig is stopped before updating balance
-        if (updatedRig.status === "stopped") {
-          clearInterval(rig.miningInterval); // Stop the mining process if it's stopped
-          rig.miningInterval = null; // Reset the interval reference
-          return; // Exit without updating the balance
-        }
-
-        const currentDate = new Date();
-        const purchaseDate = new Date(updatedRig.purchaseDate);
-
-        // Calculate the difference in milliseconds and convert it to days
-        const timeDifference = currentDate - purchaseDate; // Difference in milliseconds
-        const daysPassed = Math.floor(timeDifference / (1000 * 60 * 60 * 24));
-
-        // Update the user's balance every 3 seconds
-
-        const balanceAddition = (
-          updatedRig.dailyReturn /
-          (24 * 60 * 20)
-        ).toFixed(2);
-
-        req.user.balance += parseFloat(balanceAddition); // Simulate live mining updates
-
-        // If miningDays reach 0, stop the mining and mark the rig as completed
-        if (daysPassed >= updatedRig.miningDays) {
-          updatedRig.status = "completed";
-          clearInterval(rig.miningInterval); // Stop the mining process
-          rig.miningInterval = null; // Reset the interval reference
-        }
-
-        // Save the updated rig and user's balance
-
-        await updatedRig.save();
-        await req.user.save();
+        // Update the user's balance
+        req.user.balance += totalBalanceAddition;
+        await req.user.save(); // Save the updated user balance
       }, 3000); // Update every 3 seconds
 
       res.json({ msg: "Mining started or resumed successfully." });
