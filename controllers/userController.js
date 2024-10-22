@@ -198,55 +198,20 @@ exports.getBalance = async (req, res) => {
 };
 
 //Defining Available Rigs
-const availableRigs = [
-  {
-    rigType: "rig_1000",
-    price: 1000,
-    dailyReturn: 1000 * 0.02,
-    miningDays: 90,
-    status: "active",
-  },
-  {
-    rigType: "rig_4000",
-    price: 4000,
-    dailyReturn: 4000 * 0.02,
-    miningDays: 90,
-    status: "active",
-  },
-  {
-    rigType: "rig_8000",
-    price: 8000,
-    dailyReturn: 8000 * 0.02,
-    miningDays: 90,
-    status: "active",
-  },
-  {
-    rigType: "rig_15000",
-    price: 15000,
-    dailyReturn: 15000 * 0.02,
-    miningDays: 90,
-    status: "active",
-  },
-  {
-    rigType: "rig_60000",
-    price: 60000,
-    dailyReturn: 60000 * 0.02,
-    miningDays: 90,
-    status: "active",
-  },
-  {
-    rigType: "rig_200000",
-    price: 200000,
-    dailyReturn: 200000 * 0.02,
-    miningDays: 90,
-    status: "active",
-  },
-];
 
-// Fetch all rigs available for purchase
-exports.getAvailableRigs = (req, res) => {
+// Fetch all rigs purchased by the user
+exports.getAvailableRigs = async (req, res) => {
+  console.log(req);
   try {
-    res.status(200).json(availableRigs);
+    // Fetch the rigs that belong to the logged-in user
+    const rigs = await Rig.find({ user: req.user._id }); // Assuming `user` is the field that references the User model
+
+    // Check if rigs exist
+    if (!rigs.length) {
+      return res.status(404).json({ message: "No rigs found for this user" });
+    }
+
+    res.status(200).json(rigs);
   } catch (error) {
     res
       .status(500)
