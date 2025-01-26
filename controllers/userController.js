@@ -4,7 +4,7 @@ const Deposit = require("../models/Deposit");
 const Withdrawal = require("../models/Withdrawal");
 const Bank = require("../models/Bank");
 const generateToken = require("../utils/generateToken");
-
+const Referral = require("../models/Referral");
 const axios = require("axios");
 const qs = require("qs");
 
@@ -255,39 +255,39 @@ exports.orderRig = async (req, res) => {
 };
 
 // Start Mining
-let globalMiningInterval = null; // Global interval to handle mining
+let globalMiningInterval = null;
 
 exports.startMining = async (req, res) => {
   const { rigId } = req.body;
 
   try {
-    // Find the rig by its ID
+    // Find the specific rig
     let rig = await Rig.findById(rigId);
     if (!rig) return res.status(404).json({ msg: "Invalid rig" });
 
-    // Check if the rig belongs to the user
+    // Check if the user owns the rig
     if (rig.user.toString() !== req.user._id.toString()) {
       return res.status(403).json({ msg: "Unauthorized access to this rig" });
     }
 
-    // Check if the rig is completed and cannot resume mining
+    // Check if mining is already completed
     if (rig.status === "completed") {
       return res.status(400).json({
         msg: "Mining period is completed for this rig and cannot be resumed.",
       });
     }
 
-    // Set the rig status to active and save
+    // Set rig status to active
     if (rig.status === "stopped" || rig.status === "active") {
       rig.status = "active";
       await rig.save();
     }
 
-    // Start global interval if it's not already running
+    // Set up global mining interval if not already running
     if (!globalMiningInterval) {
       globalMiningInterval = setInterval(async () => {
         try {
-          // Find all active rigs across all users
+          // Find all active rigs
           const activeRigs = await Rig.find({ status: "active" });
 
           // Group rigs by user
@@ -299,50 +299,91 @@ exports.startMining = async (req, res) => {
             userRigsMap[rig.user].push(rig);
           });
 
-          // Loop through each user's rigs and calculate the total balance addition
+          // Process rigs for each user
           for (const userId of Object.keys(userRigsMap)) {
             let totalBalanceAddition = 0;
+            let userTotalEarnings = 0;
 
+            // Calculate earnings for each rig
             for (const rig of userRigsMap[userId]) {
               const currentDate = new Date();
               const purchaseDate = new Date(rig.purchaseDate);
 
-              // Calculate the difference in milliseconds and convert it to days
+              // Calculate days passed since rig purchase
               const timeDifference = currentDate - purchaseDate;
               const daysPassed = Math.floor(
                 timeDifference / (1000 * 60 * 60 * 24)
               );
 
-              // Calculate the balance addition for this rig
+              // Calculate balance addition (micro-earnings)
               const balanceAddition = (
                 rig.dailyReturn /
                 (24 * 60 * 20)
               ).toFixed(2);
 
               totalBalanceAddition += parseFloat(balanceAddition);
+              userTotalEarnings += parseFloat(balanceAddition);
 
-              // If miningDays reach 0, mark the rig as completed
+              // Mark rig as completed if mining period is over
               if (daysPassed >= rig.miningDays) {
                 rig.status = "completed";
               }
 
-              await rig.save(); // Save the updated rig status
+              await rig.save();
             }
 
-            // Update the user's balance atomically
+            // Find the user and check referral status
+            const user = await User.findById(userId).populate("referredBy");
+
+            // Update user's balance
             await User.findOneAndUpdate(
               { _id: userId },
               { $inc: { balance: totalBalanceAddition } }
             );
+
+            // Referral Reward System
+            if (user.referredBy) {
+              // First Layer Referral (5%)
+              const firstLayerReferralAmount = userTotalEarnings * 0.05;
+              await User.findOneAndUpdate(
+                { _id: user.referredBy._id },
+                { $inc: { balance: firstLayerReferralAmount } }
+              );
+
+              // Create first layer referral record
+              await Referral.create({
+                user: user.referredBy._id,
+                referrer: user._id,
+                layer: 1,
+                amount: firstLayerReferralAmount,
+              });
+
+              // Second Layer Referral (2.5%)
+              if (user.referredBy.referredBy) {
+                const secondLayerReferralAmount = userTotalEarnings * 0.025;
+                await User.findOneAndUpdate(
+                  { _id: user.referredBy.referredBy },
+                  { $inc: { balance: secondLayerReferralAmount } }
+                );
+
+                // Create second layer referral record
+                await Referral.create({
+                  user: user.referredBy.referredBy,
+                  referrer: user._id,
+                  layer: 2,
+                  amount: secondLayerReferralAmount,
+                });
+              }
+            }
           }
         } catch (err) {
           console.error(err.message);
 
-          // If there's an error, stop the global interval
+          // Clear the interval if an error occurs
           clearInterval(globalMiningInterval);
           globalMiningInterval = null;
         }
-      }, 3000); // Update every 3 seconds
+      }, 3000); // Runs every 3 seconds
     }
 
     res.json({ msg: "Mining started or resumed successfully." });
@@ -526,5 +567,27 @@ exports.getReferredUsers = async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ msg: "Server error", error: err.message });
+  }
+};
+
+exports.getReferralEarnings = async (req, res) => {
+  try {
+    const referrals = await Referral.find({ user: req.user._id })
+      .populate("referrer", "name")
+      .sort({ createdAt: -1 });
+
+    const summary = {
+      totalFirstLayerEarnings: referrals
+        .filter((r) => r.layer === 1)
+        .reduce((sum, r) => sum + r.amount, 0),
+      totalSecondLayerEarnings: referrals
+        .filter((r) => r.layer === 2)
+        .reduce((sum, r) => sum + r.amount, 0),
+      referrals,
+    };
+
+    res.json(summary);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
   }
 };

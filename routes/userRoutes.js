@@ -14,6 +14,7 @@ const {
   createBankDetails,
   getBankDetails,
   getReferredUsers,
+  getReferralEarnings,
 } = require("../controllers/userController");
 const { protect } = require("../middlewares/authMiddleware");
 
@@ -33,5 +34,6 @@ router.get("/get-bank", protect, getBankDetails);
 router.get("/get-withdrawals", protect, getWithdrawals);
 router.post("/create-withdrawals", protect, createWithdrawal);
 router.get("/referred-users", protect, getReferredUsers);
+router.get("/referral-earnings", protect, getReferralEarnings);
 
 module.exports = router;
